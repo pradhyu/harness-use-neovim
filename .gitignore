@@ -1,0 +1,13 @@
+# Swap files
+*.swp
+*.swo
+*.un~
+
+# Temporary files
+/tmp/*
+*.sock
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

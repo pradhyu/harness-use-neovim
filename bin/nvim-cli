@@ -1,0 +1,19 @@
+#!/bin/sh
+# Portable launcher for nvim-cli
+# Finds the real directory of this script (resolving symlinks) and invokes nvim-cli.lua with nvim -l
+
+# Resolve symlinks to find directory of script
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [ "${SOURCE%/*}" = "$SOURCE" ] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+if ! command -v nvim >/dev/null 2>&1; then
+  echo "nvim-cli: 'nvim' command not found in PATH" >&2
+  exit 1
+fi
+
+exec nvim -l "$BIN_DIR/nvim-cli.lua" "$@"

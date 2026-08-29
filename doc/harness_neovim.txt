@@ -1,0 +1,157 @@
+*harness-use-neovim.txt*   Full CLI-to-Neovim Remote Bridge for Lua & Shell
+
+==============================================================================
+CONTENTS                                           *harness-use-neovim-contents*
+
+    1. Introduction .............................. |harness-use-neovim-intro|
+    2. Installation .............................. |harness-use-neovim-install|
+    3. Setup & Configuration ..................... |harness-use-neovim-setup|
+    4. Hot-Reloading ............................. |harness-use-neovim-reload|
+    5. CLI Executable (`nvim-cli`) ............... |harness-use-neovim-cli|
+    6. Lua API Reference ......................... |harness-use-neovim-api|
+    7. $EDITOR / Terminal Integration ............ |harness-use-neovim-editor|
+    8. Commands .................................. |harness-use-neovim-commands|
+
+==============================================================================
+1. INTRODUCTION                                     *harness-use-neovim-intro*
+
+harness-use-neovim is a Neovim plugin written in 100% Lua paired with a fast,
+zero-dependency CLI (`nvim-cli`) that allows terminal sessions, shell scripts,
+and external AI harnesses running inside (or outside) Neovim to interact
+directly with the host Neovim instance.
+
+Key Features:
+- Zero external dependencies: Uses Neovim's built-in LuaJIT and LibUV.
+- Hot-reloadable: Instantly reload Lua code on the fly without restart.
+- Full RPC evaluation: Execute arbitrary Lua code, Vimscript expressions,
+  or Ex commands with structured JSON or text output.
+- Buffer and Window control: Inspect, create, edit, save, and wipe buffers;
+  control cursor position and visual selections.
+- UI elements: Floating windows, notifications, and side-by-side diffs.
+- Blocking wait mode: Use Neovim seamlessly as $EDITOR / GIT_EDITOR from inside
+  Neovim's built-in `:terminal` without nested instances.
+- Event pub/sub: Stream Neovim autocmd events in real-time to CLI processes.
+
+==============================================================================
+2. INSTALLATION                                   *harness-use-neovim-install*
+
+Using lazy.nvim: >lua
+    {
+      "pkshrestha/harness-use-neovim",
+      config = function()
+        require("harness_neovim").setup()
+      end,
+    }
+<
+Using packer.nvim: >lua
+    use {
+      "pkshrestha/harness-use-neovim",
+      config = function()
+        require("harness_neovim").setup()
+      end
+    }
+<
+To install the `nvim-cli` binary into your `$PATH` (e.g. `~/.local/bin`): >vim
+    :NvimCLIInstall
+<
+
+==============================================================================
+3. SETUP & CONFIGURATION                            *harness-use-neovim-setup*
+
+You can customize the plugin by passing options to `setup()`: >lua
+    require("harness_neovim").setup({
+      -- Automatically start RPC server if not running
+      auto_start_server = true,
+
+      -- Automatically export $NVIM socket to child processes and terminal buffers
+      set_terminal_env = true,
+
+      -- Default directory for :NvimCLIInstall
+      bin_install_dir = vim.fn.expand("~/.local/bin"),
+
+      -- Default border style for floating windows
+      default_float_border = "rounded",
+    })
+<
+
+==============================================================================
+4. HOT-RELOADING                                    *harness-use-neovim-reload*
+
+The plugin can be hot-reloaded dynamically at runtime without restarting:
+
+1. From Vim command line: >vim
+    :NvimCLIReload
+    :NvimCLI reload
+<
+2. From Lua: >lua
+    require("harness_neovim").reload()
+<
+3. From CLI / terminal: >bash
+    nvim-cli reload
+<
+This flushes cached modules from `package.loaded`, recreates user commands and
+event subscriptions, and re-executes configuration cleanly.
+
+==============================================================================
+5. CLI EXECUTABLE (`nvim-cli`)                        *harness-use-neovim-cli*
+
+`nvim-cli` automatically connects to the host Neovim via `$NVIM` (or searches
+for active sockets).
+
+General syntax: >bash
+    nvim-cli [global options] <command> [arguments...]
+
+Global options:
+    -s, --server <path>   Explicit Neovim RPC socket path
+    -j, --json            Output result as formatted JSON
+    -q, --quiet           Suppress non-error output
+    -v, --version         Show CLI version
+    -h, --help            Show help documentation
+
+Common Commands:
+    eval <lua_code>       Execute Lua code and print return value
+    expr <vim_expr>       Evaluate Vimscript expression
+    cmd <ex_cmd>          Execute Ex command (e.g. "write", "set nu")
+    reload                Hot-reload plugin Lua modules in Neovim
+    open <file> [-w]      Open file in Neovim (-w to wait until buffer is closed)
+    split <file>          Open file in horizontal split
+    vsplit <file>         Open file in vertical split
+    tabopen <file>        Open file in new tab
+    buffer list           List active buffers
+    buffer get [buf]      Get buffer text
+    buffer set [buf]      Set buffer text (from arg or stdin)
+    buffer append [buf]   Append text to buffer (from arg or stdin)
+    cursor get            Get current line & column
+    cursor set <l> <c>    Set cursor position
+    selection get         Get selected text
+    notify <msg>          Display popup notification
+    float <title> [body]  Display floating window (reads body from stdin)
+    diff <f1> <f2>        Show side-by-side diff in Neovim
+    quickfix set <json>   Populate quickfix list from JSON
+    diagnostics list      List active LSP diagnostics
+    status                Display Neovim editor status
+
+==============================================================================
+6. $EDITOR INTEGRATION                             *harness-use-neovim-editor*
+
+To use the host Neovim as your editor inside Neovim's `:terminal`: >bash
+    export EDITOR="nvim-cli edit --wait"
+    export GIT_EDITOR="nvim-cli edit --wait"
+<
+When you run `git commit`, `nvim-cli` opens the commit message in the outer
+Neovim window and blocks until you write and close the buffer (`:wq` or `:bd`),
+at which point git automatically proceeds!
+
+==============================================================================
+7. USER COMMANDS                                 *harness-use-neovim-commands*
+
+`:NvimCLI info`         Show Neovim server status, socket, and PID.
+`:NvimCLI reload`       Hot-reload plugin modules.
+`:NvimCLI socket`       Copy active server socket path to clipboard.
+`:NvimCLI install [dir]` Install `nvim-cli` binary to specified directory.
+`:NvimCLIReload`        Hot-reload plugin modules.
+`:NvimCLISocket`        Print active socket path.
+`:NvimCLIInstall`       Install `nvim-cli` binary.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
