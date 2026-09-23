@@ -1,28 +1,26 @@
 # harness-use-neovim ⚡
 
-A high-performance, 100% Lua-based Neovim plugin and companion CLI (`nvim-cli`) that enables CLI tools, terminal subshells, scripts, and AI harnesses running inside Neovim to seamlessly talk to and control the host Neovim instance.
+A high-performance, 100% Lua-based Neovim plugin that enables terminal subshells, scripts, and AI harnesses to seamlessly interact with and control the host Neovim instance.
 
 ---
 
 ## ✨ Features
 
-- **🚀 Zero External Dependencies**: 100% written in Lua using Neovim's built-in LuaJIT and LibUV runtime (`nvim -l`). No Python (`pynvim`), Node, or Ruby gems required.
-- **🔄 Hot-Reloadable**: Reload the plugin dynamically on the fly (`:NvimCLIReload` or `nvim-cli reload`) without restarting Neovim!
-- **🔌 Full RPC Execution**: Execute arbitrary Lua snippets, Vimscript expressions, or Ex commands with formatted JSON or raw text return values.
-- **📄 Buffer & Window Manipulation**: Create, read, edit, append, save, and wipe buffers from CLI or stdin pipes.
+- **🚀 Zero External Dependencies**: 100% written in Lua using Neovim's built-in LuaJIT and LibUV runtime. No Python (`pynvim`), Node, or Ruby gems required.
+- **🔄 Hot-Reloadable**: Reload the plugin dynamically on the fly (`:NvimCLIReload` or via Lua API) without restarting Neovim!
+- **🔌 Full RPC Execution**: Execute arbitrary Lua snippets, Vimscript expressions, or Ex commands with structured return values.
+- **📄 Buffer & Window Manipulation**: Create, read, edit, append, save, and wipe buffers from Lua or stdin pipes.
 - **🎯 Cursor & Selection Inspection**: Get/set cursor position, read active visual selections, and inspect viewport state.
-- **🪟 UI Popups & Floating Windows**: Display floating markdown/code windows, toasts (`vim.notify`), and side-by-side diffs directly in the parent Neovim.
+- **🪟 UI Popups & Floating Windows**: Display floating markdown/code windows, toasts (`vim.notify`), and side-by-side diffs directly in Neovim.
 - **⏳ Seamless `$EDITOR` / Git Commit Integration**: Open files and block until the user finishes editing (`:wq` / `:bd`), eliminating annoying nested Neovim sessions inside `:terminal`.
 - **🔍 LSP & Quickfix Integration**: Query LSP diagnostics and populate Neovim's quickfix list directly from compiler/linter outputs.
-- **📡 Event Streaming (Pub/Sub)**: Stream Neovim autocmd events (`BufWritePost`, `CursorMoved`, `User`, etc.) directly to your terminal or background processes.
+- **📡 Event Streaming (Pub/Sub)**: Stream Neovim autocmd events (`BufWritePost`, `CursorMoved`, `User`, etc.) in real time.
 
 ---
 
 ## 📦 Installation
 
-### 1. Install the Neovim Plugin
-
-#### Using [lazy.nvim](https://github.com/folke/lazy.nvim):
+### Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
@@ -39,7 +37,7 @@ A high-performance, 100% Lua-based Neovim plugin and companion CLI (`nvim-cli`) 
 }
 ```
 
-#### Using [packer.nvim](https://github.com/wbthomason/packer.nvim):
+### Using [packer.nvim](https://github.com/wbthomason/packer.nvim):
 
 ```lua
 use {
@@ -50,7 +48,7 @@ use {
 }
 ```
 
-#### Using [vim-plug](https://github.com/junegunn/vim-plug):
+### Using [vim-plug](https://github.com/junegunn/vim-plug):
 
 ```vim
 Plug 'pkshrestha/harness-use-neovim'
@@ -58,28 +56,16 @@ Plug 'pkshrestha/harness-use-neovim'
 
 ---
 
-### 2. Install the `nvim-cli` Executable
+## ⚙️ Configuration & Options
 
-Inside Neovim, run:
+Pass options to `require("harness_neovim").setup(opts)`:
 
-```vim
-:NvimCLIInstall
-```
-
-This copies the standalone `nvim-cli` launcher (and `nvim-cli.cmd` / `nvim-cli.ps1` on Windows) to `~/.local/bin` (or your configured `bin_install_dir`). Ensure the install folder is in your `$PATH` / `%PATH%`.
-
-Alternatively, you can symlink or copy it directly from your terminal:
-
-**Linux / macOS:**
-```bash
-ln -s /path/to/harness-use-neovim/bin/nvim-cli ~/.local/bin/nvim-cli
-```
-
-**Windows (PowerShell / CMD):**
-```powershell
-# Copy scripts to a directory in your PATH (e.g., C:\Users\<user>\bin)
-Copy-Item bin\nvim-cli* C:\Users\$env:USERNAME\bin\
-```
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `auto_start_server` | `boolean` | `true` | Ensure Neovim server socket is listening |
+| `server_name` | `string` | `nil` | Custom socket path (defaults to `$NVIM` / temp socket) |
+| `set_terminal_env` | `boolean` | `true` | Export `$NVIM` to Neovim `:terminal` subshells |
+| `bin_install_dir` | `string` | `"~/.local/bin"` | Directory for optional CLI helper installation |
 
 ---
 
@@ -87,224 +73,103 @@ Copy-Item bin\nvim-cli* C:\Users\$env:USERNAME\bin\
 
 You can hot-reload the plugin code during development or at runtime without restarting Neovim:
 
-- **From inside Neovim**:
+- **Command**:
   ```vim
   :NvimCLIReload
   " or
   :NvimCLI reload
   ```
 
-- **From Lua**:
+- **Lua API**:
   ```lua
   require("harness_neovim").reload()
   ```
 
-- **From the terminal / CLI**:
-  ```bash
-  nvim-cli reload
-  ```
-
-This purges cached modules from `package.loaded`, cleans up existing event listeners, and safely re-initializes the plugin with preserved settings.
+This purges cached modules from `package.loaded`, cleans up active event listeners, and safely re-initializes the plugin with your preserved settings.
 
 ---
 
-## 🛠️ CLI Quickstart (`nvim-cli`)
+## 💻 Lua API Reference
 
-`nvim-cli` automatically connects to the parent Neovim instance using `$NVIM` (or auto-discovers running sockets / named pipes).
-
-### 1. Evaluate Lua & Commands
-
-```bash
-# Evaluate arbitrary Lua expression
-nvim-cli eval "10 * 42"
-# Output: 420
-
-# Run Lua and return JSON
-nvim-cli eval "return { cwd = vim.fn.getcwd(), pid = vim.fn.getpid() }" --json
-
-# Execute Ex command
-nvim-cli exec "set number"
-
-# Evaluate Vimscript expression
-nvim-cli expr "expand('%:p')"
-```
-
----
-
-### 2. Buffer Operations
-
-```bash
-# List open buffers
-nvim-cli buffer list
-
-# Get current buffer contents
-nvim-cli buffer get
-
-# Replace current buffer contents from stdin
-cat report.txt | nvim-cli buffer set
-
-# Append lines to current buffer
-echo "New log entry" | nvim-cli buffer append
-
-# Create a new buffer
-nvim-cli buffer new "my_notes.txt"
-
-# Save buffer
-nvim-cli buffer write
-```
-
----
-
-### 3. Open Files & `$EDITOR` Integration
-
-```bash
-# Open file in active window
-nvim-cli open src/main.rs
-
-# Open file with cursor jumped to line 42, col 10
-nvim-cli open src/main.rs --line 42 --col 10
-
-# Open in horizontal / vertical split or new tab
-nvim-cli split src/lib.rs
-nvim-cli vsplit src/config.rs
-nvim-cli tabopen README.md
-
-# Open and block until closed ($EDITOR mode)
-nvim-cli edit --wait /tmp/msg.txt
-```
-
-#### Setup as `$EDITOR` for Neovim's `:terminal`:
-
-**Linux / macOS (`~/.bashrc` or `~/.zshrc`):**
-```bash
-if [ -n "$NVIM" ]; then
-  export EDITOR="nvim-cli edit --wait"
-  export VISUAL="nvim-cli edit --wait"
-  export GIT_EDITOR="nvim-cli edit --wait"
-fi
-```
-
-**Windows PowerShell (`$PROFILE`):**
-```powershell
-if ($env:NVIM) {
-  $env:EDITOR = "nvim-cli.cmd edit --wait"
-  $env:VISUAL = "nvim-cli.cmd edit --wait"
-  $env:GIT_EDITOR = "nvim-cli.cmd edit --wait"
-}
-```
-
-**Windows Command Prompt (`cmd.exe`):**
-```cmd
-if defined NVIM (
-  set "EDITOR=nvim-cli.cmd edit --wait"
-  set "VISUAL=nvim-cli.cmd edit --wait"
-  set "GIT_EDITOR=nvim-cli.cmd edit --wait"
-)
-```
-
-Now running `git commit` or `git rebase -i` inside a Neovim `:terminal` opens the commit buffer in your outer Neovim window!
-
----
-
-### 4. Floating Windows & Notifications
-
-```bash
-# Send a toast notification
-nvim-cli notify "Build completed in 2.4s!" --level info
-
-# Display a floating window from command output
-git diff | nvim-cli float "Git Diff (Staged)"
-cargo check 2>&1 | nvim-cli float "Compiler Output"
-
-# Show side-by-side diff in Neovim
-nvim-cli diff original.txt modified.txt
-```
-
----
-
-### 5. Cursor & Selections
-
-```bash
-# Get cursor position and current line text
-nvim-cli cursor get
-
-# Move cursor to line 25, column 5
-nvim-cli cursor set 25 5
-
-# Get the text currently selected in visual mode
-nvim-cli selection get
-```
-
----
-
-### 6. Quickfix & LSP
-
-```bash
-# Populate quickfix list from JSON
-nvim-cli quickfix set '[{"filename": "src/main.rs", "lnum": 12, "col": 4, "text": "syntax error", "type": "E"}]'
-
-# List active LSP diagnostics
-nvim-cli diagnostics list
-nvim-cli diagnostics count
-
-# Trigger LSP format
-nvim-cli lsp format
-```
-
----
-
-### 7. Real-Time Event Streaming
-
-Stream autocmd events from Neovim to your CLI:
-
-```bash
-nvim-cli listen BufWritePost CursorMoved TextChanged
-```
-
----
-
-## 💻 Lua API
-
-You can also use the Lua API directly inside Neovim or via plugins:
+The plugin provides a comprehensive, structured Lua API under `require("harness_neovim.api")`:
 
 ```lua
 local api = require("harness_neovim.api")
 
--- Buffers
+-- 1. Buffer Operations
 local bufs = api.list_buffers()
-local buf = api.create_buffer({ name = "scratch.lua", lines = { "-- Hello world" } })
-local text = api.get_buffer(buf.bufnr)
+local new_buf = api.create_buffer({ name = "scratch.lua", lines = { "-- Hello world" }, focus = true })
+local content = api.get_buffer(new_buf.bufnr)
+api.set_buffer(new_buf.bufnr, { "print('Updated content')" })
+api.append_buffer(new_buf.bufnr, { "print('Appended line')" })
+api.write_buffer(new_buf.bufnr, "/tmp/scratch.lua")
+api.delete_buffer(new_buf.bufnr, { force = true })
 
--- Windows & Cursor
-local cursor = api.get_cursor()
+-- 2. Windows & Cursor
+local cursor = api.get_cursor() -- returns { line, col, text, bufnr, win_id, file }
 api.set_cursor(10, 1)
+local wins = api.list_windows()
+api.focus_window(wins[1].win_id)
 
--- Floating window & UI
-local float = api.show_float("Quick Note", { "Line 1", "Line 2" }, { border = "rounded" })
-api.notify("Process done!", "info")
+-- 3. Selections
+local selection = api.get_selection() -- returns selected text, line/col ranges, and visual mode
 
--- Hot-reload plugin
-api.reload()
+-- 4. Floating Windows & UI
+local float = api.show_float("Notification", { "Line 1", "Line 2" }, { border = "rounded" })
+api.notify("Build completed successfully!", "info", { title = "Harness" })
+api.show_diff("Comparison", { "old line" }, { "new line" })
+
+-- 5. LSP & Diagnostics
+local diags = api.get_diagnostics()
+local counts = api.get_diagnostic_counts()
+local clients = api.get_lsp_clients()
+api.format_buffer()
+
+-- 6. Quickfix
+api.set_quickfix({
+  { filename = "src/main.rs", lnum = 12, col = 4, text = "syntax error", type = "E" }
+}, { open = true })
+local qf_items = api.get_quickfix()
+api.clear_quickfix()
+
+-- 7. Editor State
+local state = api.get_state()
+-- returns { version, pid, servername, cwd, mode, current_buf, current_win, cursor, counts... }
+```
+
+---
+
+## 📡 Event Pub/Sub Streaming
+
+Subscribe to autocmd events programmatically:
+
+```lua
+local events = require("harness_neovim.events")
+
+-- Subscribe RPC channel or callback to events
+events.subscribe(channel_id, { "BufWritePost", "CursorMoved", "User" })
+
+-- Unsubscribe
+events.unsubscribe(channel_id)
+
+-- Emit custom events
+events.emit("HarnessTaskDone", { status = "ok" })
 ```
 
 ---
 
 ## 🪟 Windows Support
 
-`harness-use-neovim` is fully compatible with Windows:
+`harness-use-neovim` is fully cross-platform:
 
 - **Zero Extra Dependencies**: Uses Neovim's built-in LuaJIT and LibUV runtime on Windows.
-- **Named Pipes RPC**: Neovim on Windows communicates via Windows Named Pipes (e.g. `\\.\pipe\nvim-12345-0`). The plugin and CLI connect seamlessly over named pipes without any extra configuration.
-- **Native Shells Supported**:
-  - **PowerShell / CMD**: Use the provided `nvim-cli.cmd` batch script or `nvim-cli.ps1` script.
-  - **Git Bash / MSYS2 / WSL**: Use the standard `nvim-cli` script.
-  - **Direct Invocation**: You can also invoke `nvim-cli.lua` directly with `nvim -l bin/nvim-cli.lua <command>`.
+- **Named Pipes RPC**: Connects seamlessly over Windows Named Pipes (`\\.\pipe\nvim-*`) without extra configuration.
 
 ---
 
 ## 🧪 Testing
 
-Run the automated test suite (Lua API unit tests + CLI integration tests):
+Run the automated test suite:
 
 ```bash
 ./tests/run_tests.sh

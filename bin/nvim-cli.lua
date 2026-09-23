@@ -98,17 +98,685 @@ local function rpc_lua(chan, code, args)
   return vim.fn.rpcrequest(chan, "nvim_exec_lua", wrapped, { code, args or {} })
 end
 
---- RPC helper: call API function with fallback
-local function rpc_api(chan, method_name, args)
-  local wrapped = string.format([[
-    local has_plugin, plugin = pcall(require, "harness_neovim")
-    if has_plugin and plugin.api and plugin.api.%s then
-      return plugin.api.%s(unpack(...))
-    end
-    error("API method %s not found. Is harness_neovim plugin loaded?")
-  ]], method_name, method_name, method_name)
+--- Remote pure Lua API fallback bundle
+local REMOTE_API_LUA = [=[
+local method_name, args = ...
 
-  local ok, res = pcall(vim.fn.rpcrequest, chan, "nvim_exec_lua", wrapped, { args or {} })
+local has_plugin, plugin = pcall(require, "harness_neovim")
+if has_plugin and plugin.api and plugin.api[method_name] then
+  return plugin.api[method_name](unpack(args or {}))
+end
+
+-- Pure Lua fallback implementation (zero dependencies, works on any Neovim)
+local function normalize_lines(lines)
+  if type(lines) == "string" then
+    lines = lines:gsub("\r\n", "\n"):gsub("\r", "\n")
+    if not lines:find("\n") and lines:find("\\n") then
+      lines = lines:gsub("\\n", "\n")
+    end
+    if lines:sub(-1) == "\n" then
+      lines = lines:sub(1, -2)
+    end
+    return vim.split(lines, "\n", { plain = true })
+  elseif type(lines) == "table" then
+    local res = {}
+    for _, l in ipairs(lines) do
+      if type(l) == "string" and l:find("\n") then
+        local sub = vim.split(l:gsub("\r\n", "\n"):gsub("\r", "\n"), "\n", { plain = true })
+        for _, s in ipairs(sub) do table.insert(res, s) end
+      else
+        table.insert(res, tostring(l))
+      end
+    end
+    return res
+  end
+  return { tostring(lines) }
+end
+
+local function resolve_bufnr(buf)
+  if buf == nil or buf == 0 or buf == "" then
+    return vim.api.nvim_get_current_buf()
+  end
+  local num = tonumber(buf)
+  if num and vim.api.nvim_buf_is_valid(num) then
+    return num
+  end
+  local target = vim.fn.fnamemodify(tostring(buf), ":p")
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_get_name(b)
+    if name == buf or name == target or vim.fn.fnamemodify(name, ":t") == buf then
+      return b
+    end
+  end
+  error("Buffer not found: " .. tostring(buf))
+end
+
+local function resolve_winid(win)
+  if win == nil or win == 0 or win == "" then
+    return vim.api.nvim_get_current_win()
+  end
+  local num = tonumber(win)
+  if num and vim.api.nvim_win_is_valid(num) then
+    return num
+  end
+  error("Invalid window ID: " .. tostring(win))
+end
+
+local function parse_level(level)
+  if type(level) == "number" then return level end
+  if type(level) == "string" then
+    local l = level:lower()
+    if l == "debug" or l == "trace" then return vim.log.levels.DEBUG
+    elseif l == "info" then return vim.log.levels.INFO
+    elseif l == "warn" or l == "warning" then return vim.log.levels.WARN
+    elseif l == "error" or l == "err" then return vim.log.levels.ERROR
+    end
+  end
+  return vim.log.levels.INFO
+end
+
+local fallback_api = {}
+
+function fallback_api.exec_cmd(cmd, opts)
+  opts = opts or {}
+  local ok, res = pcall(function()
+    if vim.api.nvim_exec2 then
+      local out = vim.api.nvim_exec2(cmd, { output = opts.output ~= false })
+      return out.output or ""
+    else
+      return vim.api.nvim_exec(cmd, opts.output ~= false)
+    end
+  end)
+  if not ok then
+    return { success = false, output = "", error = tostring(res) }
+  end
+  return { success = true, output = res }
+end
+
+function fallback_api.feedkeys(keys, mode)
+  mode = mode or "m"
+  local termcodes = vim.api.nvim_replace_termcodes(keys, true, false, true)
+  vim.api.nvim_feedkeys(termcodes, mode, false)
+  return true
+end
+
+function fallback_api.call_function(fn_path, fn_args)
+  fn_args = fn_args or {}
+  local parts = vim.split(fn_path, ".", { plain = true })
+  local curr = _G
+  for i, part in ipairs(parts) do
+    if type(curr) ~= "table" then
+      return { success = false, error = "Cannot resolve function path: " .. fn_path }
+    end
+    local next_val = curr[part]
+    if next_val == nil and i == 1 then
+      local req_ok, req_val = pcall(require, part)
+      if req_ok then next_val = req_val end
+    end
+    if next_val == nil then
+      return { success = false, error = "Symbol not found: " .. part .. " in " .. fn_path }
+    end
+    curr = next_val
+  end
+  if type(curr) ~= "function" then
+    return { success = false, error = fn_path .. " is not a function (type: " .. type(curr) .. ")" }
+  end
+  local ok, res = pcall(curr, unpack(fn_args))
+  if not ok then
+    return { success = false, error = tostring(res) }
+  end
+  return { success = true, result = res }
+end
+
+function fallback_api.list_buffers()
+  local bufs = vim.api.nvim_list_bufs()
+  local cur_buf = vim.api.nvim_get_current_buf()
+  local result = {}
+  for _, b in ipairs(bufs) do
+    if vim.api.nvim_buf_is_valid(b) then
+      local is_loaded = vim.api.nvim_buf_is_loaded(b)
+      local name = vim.api.nvim_buf_get_name(b)
+      local modified = is_loaded and vim.bo[b].modified or false
+      local filetype = is_loaded and vim.bo[b].filetype or ""
+      local buftype = is_loaded and vim.bo[b].buftype or ""
+      local line_count = is_loaded and vim.api.nvim_buf_line_count(b) or 0
+      local is_listed = vim.bo[b].buflisted
+      table.insert(result, {
+        bufnr = b,
+        name = name,
+        shortname = name ~= "" and vim.fn.fnamemodify(name, ":~:.") or "[No Name]",
+        loaded = is_loaded,
+        modified = modified,
+        listed = is_listed,
+        filetype = filetype,
+        buftype = buftype,
+        line_count = line_count,
+        current = (b == cur_buf),
+      })
+    end
+  end
+  return result
+end
+
+function fallback_api.get_buffer(bufnr, start_line, end_line)
+  local b = resolve_bufnr(bufnr)
+  local total = vim.api.nvim_buf_line_count(b)
+  start_line = start_line or 1
+  end_line = end_line or -1
+  local s0 = math.max(0, start_line - 1)
+  local e0 = end_line == -1 and -1 or math.min(total, end_line)
+  local lines = vim.api.nvim_buf_get_lines(b, s0, e0, false)
+  local name = vim.api.nvim_buf_get_name(b)
+  return {
+    bufnr = b,
+    name = name,
+    lines = lines,
+    line_count = #lines,
+    total_lines = total,
+    filetype = vim.bo[b].filetype,
+  }
+end
+
+function fallback_api.set_buffer(bufnr, lines, start_line, end_line)
+  local b = resolve_bufnr(bufnr)
+  local norm_lines = normalize_lines(lines)
+  start_line = start_line or 1
+  end_line = end_line or -1
+  local s0 = math.max(0, start_line - 1)
+  local e0 = end_line == -1 and -1 or end_line
+  vim.api.nvim_buf_set_lines(b, s0, e0, false, norm_lines)
+  return {
+    success = true,
+    bufnr = b,
+    line_count = vim.api.nvim_buf_line_count(b),
+  }
+end
+
+function fallback_api.append_buffer(bufnr, lines, after_line)
+  local b = resolve_bufnr(bufnr)
+  local norm_lines = normalize_lines(lines)
+  after_line = after_line or -1
+  local total = vim.api.nvim_buf_line_count(b)
+  local at0 = (after_line == -1 or after_line >= total) and total or after_line
+  vim.api.nvim_buf_set_lines(b, at0, at0, false, norm_lines)
+  return {
+    success = true,
+    bufnr = b,
+    line_count = vim.api.nvim_buf_line_count(b),
+  }
+end
+
+function fallback_api.create_buffer(opts)
+  opts = opts or {}
+  local listed = opts.listed ~= nil and opts.listed or true
+  local scratch = opts.scratch or false
+  local buf = vim.api.nvim_create_buf(listed, scratch)
+  if opts.name and opts.name ~= "" then
+    pcall(vim.api.nvim_buf_set_name, buf, opts.name)
+  end
+  if opts.lines then
+    local norm = normalize_lines(opts.lines)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, norm)
+  end
+  if opts.filetype then
+    vim.bo[buf].filetype = opts.filetype
+  end
+  if opts.focus then
+    vim.api.nvim_set_current_buf(buf)
+  end
+  return {
+    bufnr = buf,
+    name = vim.api.nvim_buf_get_name(buf),
+  }
+end
+
+function fallback_api.delete_buffer(bufnr, opts)
+  opts = opts or {}
+  local b = resolve_bufnr(bufnr)
+  vim.api.nvim_buf_delete(b, { force = opts.force or false, unload = opts.unload or false })
+  return { success = true, bufnr = b }
+end
+
+function fallback_api.write_buffer(bufnr, filepath)
+  local b = resolve_bufnr(bufnr)
+  local cur = vim.api.nvim_get_current_buf()
+  local switched = false
+  if b ~= cur then
+    vim.api.nvim_set_current_buf(b)
+    switched = true
+  end
+  if filepath and filepath ~= "" then
+    vim.cmd("write " .. vim.fn.fnameescape(filepath))
+  else
+    vim.cmd("write")
+  end
+  if switched and vim.api.nvim_buf_is_valid(cur) then
+    vim.api.nvim_set_current_buf(cur)
+  end
+  return {
+    success = true,
+    bufnr = b,
+    file = vim.api.nvim_buf_get_name(b),
+  }
+end
+
+function fallback_api.open_file(filepath, opts)
+  opts = opts or {}
+  local fullpath = vim.fn.fnamemodify(filepath, ":p")
+  local target_win = nil
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(win) then
+      local buf = vim.api.nvim_win_get_buf(win)
+      if vim.api.nvim_buf_get_name(buf) == fullpath then
+        target_win = win
+        break
+      end
+    end
+  end
+  if opts.split == "tab" or opts.tab then
+    vim.cmd("tabedit " .. vim.fn.fnameescape(fullpath))
+  elseif opts.split == "vertical" or opts.split == "vsplit" or opts.vsplit then
+    vim.cmd("vsplit " .. vim.fn.fnameescape(fullpath))
+  elseif opts.split == "horizontal" or opts.split == "split" or opts.split == true then
+    vim.cmd("split " .. vim.fn.fnameescape(fullpath))
+  else
+    if target_win and vim.api.nvim_win_is_valid(target_win) then
+      vim.api.nvim_set_current_win(target_win)
+    else
+      vim.cmd("edit " .. vim.fn.fnameescape(fullpath))
+    end
+  end
+  local cur_win = vim.api.nvim_get_current_win()
+  local cur_buf = vim.api.nvim_get_current_buf()
+  if opts.line then
+    local line = tonumber(opts.line) or 1
+    local col = tonumber(opts.col) or 1
+    local max_lines = vim.api.nvim_buf_line_count(cur_buf)
+    line = math.min(math.max(line, 1), max_lines)
+    pcall(vim.api.nvim_win_set_cursor, cur_win, { line, col - 1 })
+  end
+  return {
+    bufnr = cur_buf,
+    win_id = cur_win,
+    file = fullpath,
+  }
+end
+
+function fallback_api.get_cursor(win_id)
+  local w = resolve_winid(win_id)
+  local cursor = vim.api.nvim_win_get_cursor(w)
+  local b = vim.api.nvim_win_get_buf(w)
+  local line_idx = cursor[1]
+  local col_idx = cursor[2]
+  local line_text = ""
+  if line_idx <= vim.api.nvim_buf_line_count(b) then
+    local lines = vim.api.nvim_buf_get_lines(b, line_idx - 1, line_idx, false)
+    line_text = lines[1] or ""
+  end
+  return {
+    line = line_idx,
+    col = col_idx + 1,
+    bufnr = b,
+    win_id = w,
+    text = line_text,
+    file = vim.api.nvim_buf_get_name(b),
+  }
+end
+
+function fallback_api.set_cursor(line, col, win_id)
+  local w = resolve_winid(win_id)
+  local b = vim.api.nvim_win_get_buf(w)
+  local total = vim.api.nvim_buf_line_count(b)
+  local l = math.min(math.max(tonumber(line) or 1, 1), total)
+  local c = math.max(0, (tonumber(col) or 1) - 1)
+  vim.api.nvim_win_set_cursor(w, { l, c })
+  return { success = true, line = l, col = c + 1 }
+end
+
+function fallback_api.get_selection()
+  local mode = vim.fn.mode()
+  local is_visual = mode:match("[vV\22]")
+  local start_pos, end_pos
+  if is_visual then
+    start_pos = vim.fn.getpos("v")
+    end_pos = vim.fn.getpos(".")
+  else
+    start_pos = vim.fn.getpos("'<")
+    end_pos = vim.fn.getpos("'>")
+  end
+  local s_line, s_col = start_pos[2], start_pos[3]
+  local e_line, e_col = end_pos[2], end_pos[3]
+  if s_line > e_line or (s_line == e_line and s_col > e_col) then
+    s_line, e_line = e_line, s_line
+    s_col, e_col = e_col, s_col
+  end
+  local buf = vim.api.nvim_get_current_buf()
+  local total = vim.api.nvim_buf_line_count(buf)
+  if s_line < 1 or s_line > total then
+    return { text = "", lines = {}, start_pos = { line = 0, col = 0 }, end_pos = { line = 0, col = 0 }, mode = mode }
+  end
+  e_line = math.min(e_line, total)
+  local raw_lines = vim.api.nvim_buf_get_lines(buf, s_line - 1, e_line, false)
+  if #raw_lines == 0 then
+    return { text = "", lines = {}, start_pos = { line = 0, col = 0 }, end_pos = { line = 0, col = 0 }, mode = mode }
+  end
+  local lines = {}
+  if #raw_lines == 1 then
+    lines = { string.sub(raw_lines[1], s_col, e_col) }
+  else
+    lines[1] = string.sub(raw_lines[1], s_col)
+    for i = 2, #raw_lines - 1 do
+      table.insert(lines, raw_lines[i])
+    end
+    table.insert(lines, string.sub(raw_lines[#raw_lines], 1, e_col))
+  end
+  return {
+    text = table.concat(lines, "\n"),
+    lines = lines,
+    start_pos = { line = s_line, col = s_col },
+    end_pos = { line = e_line, col = e_col },
+    mode = is_visual and mode or vim.fn.visualmode(),
+  }
+end
+
+function fallback_api.list_windows()
+  local wins = vim.api.nvim_list_wins()
+  local cur_win = vim.api.nvim_get_current_win()
+  local result = {}
+  for _, w in ipairs(wins) do
+    if vim.api.nvim_win_is_valid(w) then
+      local b = vim.api.nvim_win_get_buf(w)
+      local tab = vim.api.nvim_win_get_tabpage(w)
+      local tabnr = vim.api.nvim_tabpage_get_number(tab)
+      local width = vim.api.nvim_win_get_width(w)
+      local height = vim.api.nvim_win_get_height(w)
+      local pos = vim.api.nvim_win_get_position(w)
+      local cursor = vim.api.nvim_win_get_cursor(w)
+      table.insert(result, {
+        win_id = w,
+        bufnr = b,
+        buffer_name = vim.api.nvim_buf_get_name(b),
+        tabnr = tabnr,
+        width = width,
+        height = height,
+        row = pos[1],
+        col = pos[2],
+        cursor = { line = cursor[1], col = cursor[2] + 1 },
+        current = (w == cur_win),
+      })
+    end
+  end
+  return result
+end
+
+function fallback_api.focus_window(win_id)
+  local w = resolve_winid(win_id)
+  vim.api.nvim_set_current_win(w)
+  return true
+end
+
+function fallback_api.close_window(win_id, force)
+  local w = resolve_winid(win_id)
+  vim.api.nvim_win_close(w, force or false)
+  return true
+end
+
+function fallback_api.list_tabs()
+  local tabs = vim.api.nvim_list_tabpages()
+  local cur_tab = vim.api.nvim_get_current_tabpage()
+  local result = {}
+  for _, t in ipairs(tabs) do
+    if vim.api.nvim_tabpage_is_valid(t) then
+      local nr = vim.api.nvim_tabpage_get_number(t)
+      local wins = vim.api.nvim_tabpage_list_wins(t)
+      local win_ids = {}
+      for _, w in ipairs(wins) do table.insert(win_ids, w) end
+      table.insert(result, {
+        tabnr = nr,
+        tab_id = t,
+        windows = win_ids,
+        window_count = #win_ids,
+        current = (t == cur_tab),
+      })
+    end
+  end
+  return result
+end
+
+function fallback_api.focus_tab(tabnr)
+  local num = tonumber(tabnr) or 1
+  vim.cmd("tabnext " .. tostring(num))
+  return true
+end
+
+function fallback_api.notify(msg, level, opts)
+  opts = opts or {}
+  local lvl = parse_level(level)
+  local title = opts.title or "Nvim-CLI"
+  vim.notify(tostring(msg), lvl, { title = title, timeout = opts.timeout })
+  return true
+end
+
+function fallback_api.show_float(title, lines, opts)
+  opts = opts or {}
+  if type(lines) == "string" then
+    lines = vim.split(lines, "\n", { plain = true })
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].modifiable = opts.modifiable or false
+  if opts.filetype then
+    vim.bo[buf].filetype = opts.filetype
+  end
+  local max_line_len = 0
+  for _, line in ipairs(lines) do
+    if #line > max_line_len then max_line_len = #line end
+  end
+  local editor_width = vim.o.columns
+  local editor_height = vim.o.lines
+  local width = opts.width or math.min(math.max(max_line_len + 4, 40), math.floor(editor_width * 0.85))
+  local height = opts.height or math.min(math.max(#lines, 1), math.floor(editor_height * 0.75))
+  local row = opts.row or math.floor((editor_height - height) / 2)
+  local col = opts.col or math.floor((editor_width - width) / 2)
+  local win_config = {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = opts.border or "rounded",
+    title = title and (" " .. title .. " ") or nil,
+    title_pos = title and "center" or nil,
+  }
+  local win = vim.api.nvim_open_win(buf, true, win_config)
+  vim.wo[win].wrap = opts.wrap ~= nil and opts.wrap or true
+  vim.wo[win].cursorline = opts.cursorline or false
+  local close_keys = { "q", "<Esc>" }
+  for _, key in ipairs(close_keys) do
+    vim.keymap.set("n", key, function()
+      if vim.api.nvim_win_is_valid(win) then
+        vim.api.nvim_win_close(win, true)
+      end
+    end, { buffer = buf, nowait = true, silent = true, desc = "Close floating window" })
+  end
+  return { win_id = win, bufnr = buf }
+end
+
+function fallback_api.show_diff(title, original_lines, modified_lines, opts)
+  opts = opts or {}
+  vim.cmd("tabnew")
+  local orig_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(orig_buf, 0, -1, false, original_lines)
+  vim.bo[orig_buf].buftype = "nofile"
+  vim.bo[orig_buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_name(orig_buf, (title or "Diff") .. " (Original)")
+  vim.cmd("diffthis")
+  vim.cmd("vsplit")
+  local mod_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_set_current_buf(mod_buf)
+  vim.api.nvim_buf_set_lines(mod_buf, 0, -1, false, modified_lines)
+  vim.bo[mod_buf].buftype = "nofile"
+  vim.bo[mod_buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_name(mod_buf, (title or "Diff") .. " (Modified)")
+  vim.cmd("diffthis")
+  return { orig_buf = orig_buf, mod_buf = mod_buf }
+end
+
+function fallback_api.get_quickfix()
+  local qf = vim.fn.getqflist()
+  local result = {}
+  for _, item in ipairs(qf) do
+    local filename = item.bufnr > 0 and vim.api.nvim_buf_get_name(item.bufnr) or ""
+    table.insert(result, {
+      bufnr = item.bufnr,
+      filename = filename,
+      lnum = item.lnum,
+      col = item.col,
+      text = item.text,
+      type = item.type,
+      valid = item.valid == 1,
+    })
+  end
+  return result
+end
+
+function fallback_api.set_quickfix(items, opts)
+  opts = opts or {}
+  local qf_items = {}
+  for _, it in ipairs(items) do
+    table.insert(qf_items, {
+      filename = it.filename or it.file,
+      lnum = tonumber(it.lnum or it.line) or 1,
+      col = tonumber(it.col or it.column) or 1,
+      text = it.text or it.message or "",
+      type = it.type or (it.severity and it.severity:sub(1, 1):upper() or "E"),
+    })
+  end
+  vim.fn.setqflist(qf_items, opts.action or "r")
+  if opts.title then
+    vim.fn.setqflist({}, "a", { title = opts.title })
+  end
+  if opts.open then
+    vim.cmd("copen")
+  end
+  return true
+end
+
+function fallback_api.clear_quickfix()
+  vim.fn.setqflist({}, "r")
+  return true
+end
+
+function fallback_api.get_diagnostics(opts)
+  opts = opts or {}
+  local bufnr = opts.bufnr and resolve_bufnr(opts.bufnr) or nil
+  local diags = vim.diagnostic.get(bufnr)
+  local result = {}
+  for _, d in ipairs(diags) do
+    local sev_str = "HINT"
+    if d.severity == vim.diagnostic.severity.ERROR then sev_str = "ERROR"
+    elseif d.severity == vim.diagnostic.severity.WARN then sev_str = "WARN"
+    elseif d.severity == vim.diagnostic.severity.INFO then sev_str = "INFO"
+    end
+    table.insert(result, {
+      bufnr = d.bufnr,
+      file = vim.api.nvim_buf_get_name(d.bufnr),
+      lnum = d.lnum + 1,
+      col = d.col + 1,
+      end_lnum = (d.end_lnum or d.lnum) + 1,
+      end_col = (d.end_col or d.col) + 1,
+      severity = sev_str,
+      message = d.message,
+      source = d.source or "",
+      code = d.code or "",
+    })
+  end
+  return result
+end
+
+function fallback_api.get_diagnostic_counts(bufnr)
+  local b = bufnr and resolve_bufnr(bufnr) or nil
+  local diags = vim.diagnostic.get(b)
+  local counts = { error = 0, warn = 0, info = 0, hint = 0, total = #diags }
+  for _, d in ipairs(diags) do
+    if d.severity == vim.diagnostic.severity.ERROR then counts.error = counts.error + 1
+    elseif d.severity == vim.diagnostic.severity.WARN then counts.warn = counts.warn + 1
+    elseif d.severity == vim.diagnostic.severity.INFO then counts.info = counts.info + 1
+    elseif d.severity == vim.diagnostic.severity.HINT then counts.hint = counts.hint + 1
+    end
+  end
+  return counts
+end
+
+function fallback_api.get_lsp_clients(bufnr)
+  local b = bufnr and resolve_bufnr(bufnr) or nil
+  local clients = {}
+  if vim.lsp.get_clients then
+    clients = vim.lsp.get_clients({ bufnr = b })
+  elseif vim.lsp.get_active_clients then
+    clients = vim.lsp.get_active_clients({ bufnr = b })
+  end
+  local result = {}
+  for _, c in ipairs(clients) do
+    table.insert(result, {
+      id = c.id,
+      name = c.name,
+      root_dir = c.config.root_dir or "",
+      attached_buffers = vim.tbl_keys(c.attached_buffers or {}),
+    })
+  end
+  return result
+end
+
+function fallback_api.format_buffer(bufnr)
+  local b = resolve_bufnr(bufnr)
+  vim.lsp.buf.format({ bufnr = b, async = false })
+  return true
+end
+
+function fallback_api.get_state()
+  local cur_buf = vim.api.nvim_get_current_buf()
+  local cur_win = vim.api.nvim_get_current_win()
+  local cursor = vim.api.nvim_win_get_cursor(cur_win)
+  local ver = vim.version()
+  return {
+    version = string.format("%d.%d.%d", ver.major, ver.minor, ver.patch),
+    pid = vim.fn.getpid(),
+    servername = vim.v.servername,
+    cwd = vim.fn.getcwd(),
+    mode = vim.fn.mode(),
+    current_buf = cur_buf,
+    current_file = vim.api.nvim_buf_get_name(cur_buf),
+    current_win = cur_win,
+    cursor = { line = cursor[1], col = cursor[2] + 1 },
+    buffer_count = #vim.api.nvim_list_bufs(),
+    window_count = #vim.api.nvim_list_wins(),
+    tab_count = #vim.api.nvim_list_tabpages(),
+  }
+end
+
+function fallback_api.reload(opts)
+  local has_p, p = pcall(require, "harness_neovim")
+  if has_p and p.reload then
+    local ok, res = p.reload(opts)
+    return { success = ok, message = tostring(res) }
+  end
+  return { success = true, message = "No harness_neovim plugin loaded to reload" }
+end
+
+if fallback_api[method_name] then
+  return fallback_api[method_name](unpack(args or {}))
+end
+
+error("API method " .. tostring(method_name) .. " not found")
+]=]
+
+--- RPC helper: call API function with pure Lua fallback
+local function rpc_api(chan, method_name, args)
+  local ok, res = pcall(vim.fn.rpcrequest, chan, "nvim_exec_lua", REMOTE_API_LUA, { method_name, args or {} })
   if not ok then
     return false, res
   end
@@ -206,99 +874,122 @@ EXAMPLES:
 end
 
 --------------------------------------------------------------------------------
--- CLI Dispatcher
+-- Main CLI Entry Point
 --------------------------------------------------------------------------------
 
-local function main(args)
-  local global_opts = {
-    server = nil,
-    json = false,
-    quiet = false,
-    help = false,
-    version = false,
-  }
-
-  local cmd = nil
-  local sub_args = {}
-
-  local i = 1
-  while i <= #args do
-    local arg = args[i]
-    if not cmd then
-      if arg == "-s" or arg == "--server" then
-        i = i + 1
-        global_opts.server = args[i]
-      elseif arg == "-j" or arg == "--json" then
-        global_opts.json = true
-      elseif arg == "-q" or arg == "--quiet" then
-        global_opts.quiet = true
-      elseif arg == "-v" or arg == "--version" then
-        global_opts.version = true
-      elseif arg == "-h" or arg == "--help" then
-        global_opts.help = true
-      elseif arg:sub(1, 1) == "-" and arg ~= "-" then
-        print_err("Unknown global option: " .. arg)
-        return 1
-      else
-        cmd = arg
-      end
-    else
-      table.insert(sub_args, arg)
-    end
-    i = i + 1
-  end
-
-  if global_opts.version then
-    print_out("nvim-cli version " .. VERSION)
-    return 0
-  end
-
-  if global_opts.help or not cmd then
+local function main()
+  local args = _G.arg or {}
+  if #args == 0 then
     print_help()
     return 0
   end
 
-  -- Find server
-  local socket = find_socket(global_opts.server)
-  if not socket then
-    if cmd == "server" then
-      print_err("No active Neovim server found. (Is $NVIM set?)")
-      return 1
+  local global_opts = {
+    server = nil,
+    json = false,
+    quiet = false,
+  }
+
+  local cmd = nil
+  local sub_args = {}
+  local i = 1
+
+  while i <= #args do
+    local a = args[i]
+    if not cmd then
+      if a == "-h" or a == "--help" or a == "help" then
+        print_help()
+        return 0
+      elseif a == "-v" or a == "--version" or a == "version" then
+        print_out("nvim-cli version " .. VERSION)
+        return 0
+      elseif a == "-j" or a == "--json" then
+        global_opts.json = true
+      elseif a == "-q" or a == "--quiet" then
+        global_opts.quiet = true
+      elseif a == "-s" or a == "--server" then
+        i = i + 1
+        global_opts.server = args[i]
+      elseif a:sub(1, 1) == "-" then
+        print_err("Unknown option: " .. a)
+        return 1
+      else
+        cmd = a
+      end
+    else
+      table.insert(sub_args, a)
     end
-    print_err("Could not find active Neovim instance. Make sure Neovim is running with a socket or $NVIM is set.")
-    return 1
+    i = i + 1
   end
 
-  if cmd == "server" then
-    print_out(socket)
+  if not cmd then
+    print_help()
     return 0
   end
 
-  -- Connect
-  local chan = connect_rpc(socket)
-
+  -- Output helper
   local function output_val(val)
     if global_opts.quiet then return end
     if global_opts.json then
-      print_out(vim.json.encode(val))
+      if type(val) == "string" and ((val:sub(1, 1) == "{" and val:sub(-1) == "}") or (val:sub(1, 1) == "[" and val:sub(-1) == "]")) then
+        print_out(val)
+      else
+        local ok, encoded = pcall(vim.json.encode, val)
+        if ok then
+          print_out(encoded)
+        else
+          print_out(vim.inspect(val))
+        end
+      end
     else
-      if type(val) == "table" then
-        if #val > 0 then
-          local all_strings = true
-          for _, it in ipairs(val) do
-            if type(it) ~= "string" then all_strings = false; break end
-          end
-          if all_strings then
-            print_out(table.concat(val, "\n"))
-            return
+      if val == nil then return end
+      if type(val) == "string" then
+        print_out(val)
+      elseif type(val) == "number" or type(val) == "boolean" then
+        print_out(tostring(val))
+      elseif type(val) == "table" then
+        local is_list_of_strings = #val > 0
+        for _, it in ipairs(val) do
+          if type(it) ~= "string" then
+            is_list_of_strings = false
+            break
           end
         end
-        print_out(vim.json.encode(val))
+        if is_list_of_strings then
+          print_out(table.concat(val, "\n"))
+        else
+          local ok, encoded = pcall(vim.json.encode, val)
+          if ok then
+            print_out(encoded)
+          else
+            print_out(vim.inspect(val))
+          end
+        end
       else
         print_out(tostring(val))
       end
     end
   end
+
+  -- COMMAND: server (does not require connection)
+  if cmd == "server" or cmd == "socket" then
+    local sock = find_socket(global_opts.server)
+    if not sock then
+      print_err("No active Neovim server socket found")
+      return 1
+    end
+    output_val(sock)
+    return 0
+  end
+
+  -- Connect to Neovim
+  local server_path = find_socket(global_opts.server)
+  if not server_path then
+    print_err("No active Neovim instance detected. Set $NVIM or use --server <path>")
+    return 1
+  end
+
+  local chan = connect_rpc(server_path)
 
   ------------------------------------------------------------------------------
   -- COMMAND: lua / eval
@@ -927,8 +1618,41 @@ local function main(args)
     local events = #sub_args > 0 and sub_args or { "BufWritePost", "CursorMoved", "User" }
     local wrapped = [[
       local chan, events = ...
-      local events_mod = require("harness_neovim.events")
-      return events_mod.subscribe(chan, events)
+      if type(events) == "string" then events = { events } end
+      if not events or #events == 0 then events = { "BufWritePost", "BufEnter", "CursorMoved", "ModeChanged", "User" } end
+      local group_name = "HarnessNvimEvents_" .. tostring(chan)
+      local group_id = vim.api.nvim_create_augroup(group_name, { clear = true })
+      for _, ev in ipairs(events) do
+        local event_name = ev
+        local pattern = "*"
+        if ev:match("^User ") then
+          event_name = "User"
+          pattern = ev:sub(6)
+        end
+        pcall(function()
+          vim.api.nvim_create_autocmd(event_name, {
+            group = group_id,
+            pattern = pattern,
+            callback = function(ev_data)
+              local payload = {
+                event = ev_data.event,
+                buf = ev_data.buf,
+                file = ev_data.file,
+                match = ev_data.match,
+                data = ev_data.data,
+                timestamp = os.time(),
+              }
+              local ok = pcall(function()
+                vim.fn.rpcnotify(chan, "harness_event", payload)
+              end)
+              if not ok then
+                pcall(vim.api.nvim_del_augroup_by_id, group_id)
+              end
+            end,
+          })
+        end)
+      end
+      return true
     ]]
 
     local ok, res = pcall(vim.fn.rpcrequest, chan, "nvim_exec_lua", wrapped, { chan, events })
@@ -944,7 +1668,15 @@ local function main(args)
     local sig = uv.new_signal()
     uv.signal_start(sig, "sigint", function()
       print_out("\nUnsubscribing and exiting...")
-      pcall(vim.fn.rpcrequest, chan, "nvim_exec_lua", "require('harness_neovim.events').unsubscribe(...)", { chan })
+      local unsub_code = [[
+        local chan = ...
+        local group_name = "HarnessNvimEvents_" .. tostring(chan)
+        pcall(function()
+          local gid = vim.api.nvim_create_augroup(group_name, { clear = false })
+          vim.api.nvim_del_augroup_by_id(gid)
+        end)
+      ]]
+      pcall(vim.fn.rpcrequest, chan, "nvim_exec_lua", unsub_code, { chan })
       vim.fn.chanclose(chan)
       os.exit(0)
     end)
@@ -965,5 +1697,5 @@ local function main(args)
   end
 end
 
-local exit_code = main(_G.arg or {})
+local exit_code = main()
 os.exit(exit_code or 0)

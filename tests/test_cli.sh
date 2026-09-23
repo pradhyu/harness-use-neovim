@@ -2,7 +2,7 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$PROJECT_DIR/bin/nvim-cli"
+BIN="$PROJECT_DIR/bin/nvim-cli.lua"
 SOCKET="/tmp/test_nvim_cli_suite_$$.sock"
 
 echo "Starting headless Neovim server on $SOCKET..."

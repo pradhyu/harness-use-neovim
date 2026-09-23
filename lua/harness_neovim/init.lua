@@ -78,11 +78,10 @@ function M.install_cli(target_dir)
   -- Find the plugin root directory
   local script_path = debug.getinfo(1, "S").source:sub(2)
   local plugin_root = vim.fn.fnamemodify(script_path, ":p:h:h:h")
-  local bin_src = plugin_root .. "/bin/nvim-cli"
   local bin_lua = plugin_root .. "/bin/nvim-cli.lua"
 
-  if vim.fn.filereadable(bin_src) == 0 then
-    return false, "Source binary not found at " .. bin_src
+  if vim.fn.filereadable(bin_lua) == 0 then
+    return false, "Source file not found at " .. bin_lua
   end
 
   -- Create target directory if needed
@@ -92,8 +91,6 @@ function M.install_cli(target_dir)
 
   local dest_bin = target_dir .. "/nvim-cli"
   local dest_lua = target_dir .. "/nvim-cli.lua"
-  local dest_cmd = target_dir .. "/nvim-cli.cmd"
-  local dest_ps1 = target_dir .. "/nvim-cli.ps1"
 
   -- Copy files
   local uv = vim.uv or vim.loop
@@ -112,22 +109,9 @@ function M.install_cli(target_dir)
     return true
   end
 
-  local ok1, err1 = copy_file(bin_src, dest_bin)
+  local ok1, err1 = copy_file(bin_lua, dest_bin)
   if not ok1 then return false, err1 end
-
-  if vim.fn.filereadable(bin_lua) == 1 then
-    copy_file(bin_lua, dest_lua)
-  end
-
-  local bin_cmd = plugin_root .. "/bin/nvim-cli.cmd"
-  if vim.fn.filereadable(bin_cmd) == 1 then
-    copy_file(bin_cmd, dest_cmd)
-  end
-
-  local bin_ps1 = plugin_root .. "/bin/nvim-cli.ps1"
-  if vim.fn.filereadable(bin_ps1) == 1 then
-    copy_file(bin_ps1, dest_ps1)
-  end
+  copy_file(bin_lua, dest_lua)
 
   return true, "Successfully installed nvim-cli to " .. dest_bin
 end
